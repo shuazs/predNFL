@@ -76,7 +76,3 @@ Run the legacy scripts (thin wrappers around the CLI):
 python scripts/run_backtest.py
 python scripts/predict_matchup.py --season 2025 --teams NE DEN
 ```
-
-## Notebooks
-
-Exploratory notebooks live in `notebooks/`.
