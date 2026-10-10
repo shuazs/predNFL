@@ -55,6 +55,16 @@ def _resolve_optional_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> s
     return None
 
 
+def _prior_rolling_mean(grouped: "pd.core.groupby.SeriesGroupBy", window: int) -> pd.Series:
+    """Rolling mean over each team's previous `window` games, excluding the current one.
+
+    The shift has to happen *inside* each group. Calling `.shift(1)` on the
+    result of `grouped.rolling(...)` shifts the concatenated series, which
+    leaks each team's last value into the next team's first row.
+    """
+    return grouped.transform(lambda s: s.rolling(window).mean().shift(1))
+
+
 def _prepare_team_stats(
     team_stats: pd.DataFrame,
     rolling_window: int,
@@ -99,9 +109,7 @@ def _prepare_team_stats(
     rolled_columns = []
     for metric in selected_metrics:
         roll_name = f"{metric}_roll"
-        team_stats[roll_name] = (
-            group[metric].rolling(rolling_window).mean().shift(1).reset_index(level=0, drop=True)
-        )
+        team_stats[roll_name] = _prior_rolling_mean(group[metric], rolling_window)
         rolled_columns.append(roll_name)
 
     join_cols = ["game_id"] if "game_id" in team_stats.columns else ["season", "week"]
@@ -192,12 +200,8 @@ def build_features(
     team_games.sort_values(["team", "season", "week", "game_date"], inplace=True)
 
     group = team_games.groupby("team", sort=False)
-    team_games["pf_roll"] = (
-        group["points_for"].rolling(rolling_window).mean().shift(1).reset_index(level=0, drop=True)
-    )
-    team_games["pa_roll"] = (
-        group["points_against"].rolling(rolling_window).mean().shift(1).reset_index(level=0, drop=True)
-    )
+    team_games["pf_roll"] = _prior_rolling_mean(group["points_for"], rolling_window)
+    team_games["pa_roll"] = _prior_rolling_mean(group["points_against"], rolling_window)
     team_games["last_game_date"] = group["game_date"].shift(1)
     team_games["rest_days"] = (
         team_games["game_date"] - team_games["last_game_date"]

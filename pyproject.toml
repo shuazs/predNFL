@@ -13,6 +13,9 @@ dependencies = [
   "pyarrow>=14.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.scripts]
 prednfl = "prednfl.cli:main"
 
@@ -27,3 +30,4 @@ where = ["src"]
 minversion = "7.0"
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = ["src"]

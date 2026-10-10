@@ -70,6 +70,13 @@ Options:
 
 ## Development
 
+Run the tests (no network needed; data loading is stubbed):
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
 Run the legacy scripts (thin wrappers around the CLI):
 
 ```bash
