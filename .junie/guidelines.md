@@ -23,6 +23,15 @@ Fill in **Junie report** in `HANDOFF.md`:
 
 Don't edit the **Current task**, **Review**, **Backlog** or **Decisions** sections; Claude maintains those.
 
+## Before writing "Deviations: None"
+Run this command and paste its output into the report:
+
+```bash
+git diff HEAD -U0 -- tests/ | grep -E '^-def |^-    assert'
+```
+
+Any line it prints is a deleted test or a deleted assertion in an existing test. That is a deviation and must be explained, so you may not report "None".
+
 ## Project basics
 - Source in `src/prednfl/`, tests in `tests/` (offline; data loading is stubbed).
 - Install: `pip install -e ".[dev]"`. Test: `pytest`.

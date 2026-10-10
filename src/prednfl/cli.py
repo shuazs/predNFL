@@ -45,6 +45,12 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     backtest.add_argument("--rolling-window", type=int, help="Rolling games window")
     backtest.add_argument("--min-games", type=int, help="Min games before training")
     backtest.add_argument("--c", type=float, help="Logistic regression C value")
+    backtest.add_argument(
+        "--model",
+        choices=["logreg", "market_offset"],
+        help="Model type to use (logreg or market_offset)",
+    )
+    backtest.add_argument("--alpha", type=float, help="Market offset L2 penalty")
 
     predict = subparsers.add_parser("predict", help="Predict a single matchup")
     predict.add_argument("--season", type=int, required=True, help="Season year")
@@ -77,6 +83,10 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         config = replace(config, min_games_before_train=int(args.min_games))
     if getattr(args, "c", None) is not None:
         config = replace(config, logreg_c=float(args.c))
+    if getattr(args, "model", None):
+        config = replace(config, model=args.model)
+    if getattr(args, "alpha", None) is not None:
+        config = replace(config, alpha=float(args.alpha))
     return config
 
 
@@ -98,13 +108,16 @@ def _run_backtest(config: BacktestConfig) -> None:
         min_games_before_train=config.min_games_before_train,
         random_state=config.random_state,
         logreg_c=config.logreg_c,
+        model=config.model,
+        alpha=config.alpha,
     )
     result = backtester.run(features, feature_columns)
 
     cov = result.coverage
     print(f"Tested {cov['tested']} of {cov['games_with_result']} games (skipped: {cov['skipped_missing_features']} missing features, {cov['skipped_min_games']} before min games)")
 
-    print(f"\nBacktest summary metrics (C={config.logreg_c})")
+    param_str = f"C={config.logreg_c}" if config.model == "logreg" else f"alpha={config.alpha}"
+    print(f"\nBacktest summary metrics ({config.model}, {param_str})")
 
     # Pooled Table
     prefixes = ["model", "baseline_home_rate", "baseline_prior_season", "baseline_market"]

@@ -13,142 +13,136 @@ Ownership: Claude edits Current task, Review, Backlog, Decisions. Junie edits Ju
 ### Task 1: Make the backtest representative ✅ approved 2026-10-10
 Done. Details are in git history and the Review section.
 
-### Task 2: Market-offset model and feature ablation
+### Task 2: Market-offset model and feature ablation ✅ approved 2026-10-10
+Done. Details are in git history and the Review section.
+
+### Task 3: Kalshi vs. Vegas study (market against market, no model)
 
 **Status: ready to start.**
 
-**Why.** Diagnostics on 2021–2024 (walk-forward, 1,032 games, log loss measured against the vig-free market):
-- Plain logistic regression given *only* the market's log-odds still loses, by +0.013 even at C=10. Refitting the market from a few hundred games adds noise.
-- Starting from the market as a fixed offset, `logit(p) = logit(market) + b + w·x`, fixes that. With no features it **ties the market** (+0.0009, CI −0.0004 to +0.0021).
-- Adding the current diff features to that offset model makes it worse (+0.006 to +0.019, depending on regularization). The current features carry no information the market hasn't already priced in.
+**Why.** The Vegas closing line is hard to beat with public stats, and the Task 2 ablation is likely to confirm that. The more realistic edge is **venue and timing**: Kalshi is newer and has a lot of recreational money, so its prices before kickoff may be worse than the Vegas close. If they're worse by more than Kalshi's fees, that's an edge without any modeling. This study measures it.
 
-This task builds the setup for testing any future feature honestly: each one has to beat the market, starting from the market.
+**What we know about the API (verify against the docs and note any differences in your report)**
+- Base URL: `https://api.elections.kalshi.com/trade-api/v2`. Market data needs no authentication.
+- NFL game markets are series `KXNFLGAME`, with one market per team per game. Example: event `KXNFLGAME-26SEP20INDKC`, markets `...-KC` ("Kansas City wins") and `...-IND`.
+- Recently settled markets: `GET /markets?series_ticker=KXNFLGAME&status=settled`. Older ones: `GET /historical/markets`. The boundary between them: `GET /historical/cutoff` → `market_settled_ts` (currently 2026-08-10).
+- Candlesticks: `GET /historical/markets/{ticker}/candlesticks` for archived markets, and the live candlesticks endpoint for recent ones. Check the docs for the live path and the `start_ts` / `end_ts` / `period_interval` parameters.
+- Lists are cursor-paginated. Prices come back as dollar strings (`"0.9900"`).
+- Some games have duplicate markets with 0 volume.
+- Docs: https://docs.kalshi.com/getting_started/historical_data and https://docs.kalshi.com/getting_started/quick_start_market_data
 
 **Steps**
-0. **Carry-over from the Task 1 review. Do these first and report each one as done or not done.**
-   - `test_market_baseline_is_vig_free_moneyline`: give at least two games **different** moneylines, for example alternating −150/+130 and +200/−240, and check each row's `baseline_market` against its own expected value. A constant moneyline can't catch a row mix-up.
-   - `test_coverage_counts_add_up`: replace the `> 0` checks with the **exact** expected value for each of `tested`, `skipped_missing_features` and `skipped_min_games`, and delete the thinking-out-loud comments. Do the same for the "But wait…" comments in `test_unplayed_games_are_never_trained_or_tested`.
-1. `features.py`: add columns `market_prob = home_ml_prob / (home_ml_prob + away_ml_prob)` and `market_logit = log(market_prob / (1 - market_prob))`. Only add them when the moneyline columns exist. Do **not** add them to the returned feature list; the existing model must behave exactly as before.
-2. `models.py`: add `MarketOffsetLogit(alpha: float)` with `fit(X, y, offset)` and `predict_proba(X, offset) -> np.ndarray` (positive-class probabilities, like the existing wrapper).
-   - Standardize X using the training mean and std (std 0 → 1).
-   - Minimize mean log loss + `alpha * sum(w**2)` with `scipy.optimize.minimize(method="L-BFGS-B", jac=True)` and an analytic gradient. Use `np.logaddexp(0, z) - y*z` for the loss so it's numerically stable.
-   - The intercept `b` is **not** penalized.
-   - Must work with zero feature columns (fits the intercept only).
-3. `backtest.py`: `Backtester(..., model: str = "logreg", alpha: float = 0.01)`. When `model == "market_offset"`:
-   - offset = `market_logit`
-   - X = `feature_columns` minus `{spread_line, home_ml_prob, away_ml_prob, ml_prob_diff, market_prob, market_logit}`
-   - drop rows with NaN `market_logit`
-   The default path must be unchanged.
-4. `cli.py`: add `--model {logreg,market_offset}` (default `logreg`) and `--alpha` (default 0.01) to `backtest`. Also add `model: str` and `alpha: float` to `BacktestConfig`.
-5. `scripts/ablation.py`: run `market_offset` on **2021–2024 only**, with alpha in {0.001, 0.01, 0.1}, for each feature group:
-   - none (intercept only)
-   - points: `pf_roll_diff`, `pa_roll_diff`
-   - rest: `rest_days_diff`, `rest_sched_diff`
-   - offense EPA: the three `ts_*_epa_*_diff` columns
-   - defense: `ts_def_*_diff`
-   - all of the above
+1. **`src/prednfl/kalshi.py`: client.** Add `requests` to the dependencies.
+   - `list_nfl_markets()` merges the live settled and historical endpoints, follows every cursor, and dedupes by ticker.
+   - `get_candles(ticker, start_ts, end_ts, period_minutes)` routes to the historical or live endpoint using the cutoff.
+   - Cache every raw response as JSON under `data/kalshi/` (add `data/` to `.gitignore`). On re-runs, read from the cache instead of the network.
+   - Sleep about 0.2 s between requests. Retry 429 and 5xx responses with backoff, up to 3 times.
+2. **Match each Kalshi event to an nflverse `game_id`.**
+   - Parse the event ticker (`YYMMMDD` + team codes).
+   - Match on date (±1 day, since Kalshi uses UTC) plus the pair of teams.
+   - Keep a team-code alias map for codes that differ from nflverse (watch `LA`/`LAR`, `JAC`/`JAX`, `WAS`/`WSH`, `LV`/`OAK`).
+   - When an event has duplicate markets, keep the one with the highest volume.
+   - Write every unmatched event to the report.
+3. **Price snapshots.**
+   - Kickoff in UTC = nflverse `gameday` + `gametime`, which are US Eastern.
+   - For each game and team, take the last 1-minute candle closing **at or before** kickoff − 24h, kickoff − 1h, and kickoff − 5min. Nothing after kickoff can ever be used.
+   - Price = midpoint of the yes bid and yes ask at that candle's close. If there's no quote, fall back to the last trade price and set a `used_last_trade` flag.
+   - Also record the ask and the bid/ask spread.
+   - Kalshi home probability = `mid_home / (mid_home + mid_away)`.
+4. **`scripts/kalshi_study.py`: scoring.** Seasons 2025 and 2026 to date.
+   - For each snapshot: n, log loss, Brier, and accuracy of the Kalshi probability; the same for the vig-free Vegas close (`home_ml_prob / (home_ml_prob + away_ml_prob)`) **on the same games**; and the Kalshi − Vegas log-loss difference with `paired_bootstrap_diff`.
+   - Also the mean |Kalshi − Vegas| for each snapshot, to show whether Kalshi converges toward Vegas as kickoff gets closer.
+5. **Trading simulation in the same script.**
+   - At each snapshot and threshold t ∈ {0.02, 0.04, 0.06}: if `vegas_home − home_ask > t`, buy 1 home YES at the ask. If `vegas_away − away_ask > t`, buy 1 away YES at the ask.
+   - P&L per contract = outcome − ask − fee.
+   - Put the fee in one function, `kalshi_fee(price, contracts)`. Look up Kalshi's current fee schedule (https://kalshi.com/fee-schedule) and cite it in a comment and in the report.
+   - Report n bets, total P&L, ROI, and a bootstrap 95% CI on mean P&L per bet.
+   - **Label the −24h and −1h rows "upper bound (uses Vegas close, not known at that time)".** Only the −5min row is roughly tradable.
+6. **Output.** Print the tables and write `data/kalshi/study_games.csv`, one row per game with every snapshot price, the Vegas probability and the outcome.
 
-   Print one row per group and alpha: n, model − market log loss, 95% CI (use `paired_bootstrap_diff`). Never load or score 2025 in this script.
-
-**Tests to add**
-- `test_models.py::test_offset_model_gradient_matches_numerical` (use `scipy.optimize.check_grad` on the objective)
-- `test_models.py::test_offset_model_without_features_returns_sigmoid_offset_plus_intercept`
-- `test_models.py::test_offset_model_recovers_known_weight` (simulate `y ~ Bernoulli(sigmoid(offset + 0.8*x))`, n ≈ 5,000, tiny alpha → weight within ±0.15 of 0.8 after accounting for standardization)
-- `test_models.py::test_offset_model_large_alpha_shrinks_weights_to_zero_but_not_intercept`
-- `test_features.py::test_market_prob_is_vig_free_and_not_a_model_feature`
-- `test_backtest.py::test_market_offset_never_uses_market_columns_as_features` (spy on `fit` and check the X column count)
-- `test_backtest.py::test_default_backtest_unchanged_by_market_columns` (the logreg predictions are identical before and after step 1)
-- `test_cli.py`: parse `--model market_offset --alpha 0.1`
+**Tests to add (offline; no network in tests; use small JSON fixtures in `tests/fixtures/kalshi/`)**
+- `test_kalshi.py::test_parse_event_ticker`
+- `test_kalshi.py::test_team_alias_mapping`
+- `test_kalshi.py::test_pagination_follows_cursor_until_empty` (monkeypatch the HTTP call)
+- `test_kalshi.py::test_routes_to_historical_before_cutoff_and_live_after`
+- `test_kalshi.py::test_duplicate_markets_keep_highest_volume`
+- `test_kalshi.py::test_snapshot_never_uses_candle_after_target_time`
+- `test_kalshi.py::test_snapshot_falls_back_to_last_trade_and_flags_it`
+- `test_kalshi.py::test_home_prob_normalizes_two_markets`
+- `test_kalshi.py::test_trade_pnl_and_fee`
+- `test_kalshi.py::test_cache_is_used_on_second_call`
 
 **Done when**
-- [ ] `pytest` passes and no existing test was edited (if one had to be, say so in Deviations)
-- [ ] `prednfl backtest --model market_offset` on 2021–2024 shows a model − market log loss whose 95% CI includes 0
-- [ ] Full `scripts/ablation.py` output pasted into the Junie report
+- [ ] `pytest` passes, with no network access during tests
+- [ ] The study runs end to end. In your report, give: number of matched games per season, the unmatched list, the full printed tables, and which candle fields you used for bid, ask and last trade
+- [ ] `data/` is gitignored, and no downloaded data is committed
 
 ---
 
 ## Junie report
 
-- **Status:** Task 1 done.
+- **Status:** done
 - **Files changed:**
-    - `src/prednfl/config.py`: Removed `fg_pct`.
-    - `src/prednfl/features.py`: `home_win` is NaN for unplayed games.
-    - `src/prednfl/backtest.py`: Market baseline, coverage, pooled metrics.
-    - `src/prednfl/metrics.py`: `paired_bootstrap_diff`.
-    - `src/prednfl/cli.py`: Updated output; switched to `evaluate()` for per-season metrics.
-    - `tests/test_backtest.py`: Strengthened and finished new tests.
-- **Tests:** All 80 tests pass.
-- **Deviations from plan:** None.
-- **Questions / issues noticed:** None.
-- **Full `prednfl backtest` output:**
-```
-Tested 1032 of 1139 games (skipped: 0 missing features, 107 before min games)
-
-Backtest summary metrics (C=0.05)
-Model                         Acc   LogLoss   Brier
----------------------------------------------------
-model                      0.6444    0.6450  0.2258
-baseline_home_rate         0.5533    0.6980  0.2509
-baseline_prior_season      0.5785    0.6868  0.2463
-baseline_market            0.6686    0.6133  0.2124
-
-per-week average
-
-model
-accuracy: 0.6273
-log_loss: 0.6472
-brier: 0.2273
-
-baseline_home_rate
-accuracy: 0.5688
-log_loss: 0.6929
-brier: 0.2485
-
-baseline_prior_season
-accuracy: 0.5841
-log_loss: 0.6814
-brier: 0.2437
-
-baseline_market
-accuracy: 0.6474
-log_loss: 0.6183
-brier: 0.2148
-
-per-season pooled log loss
-Season 2021: model 0.7314, market 0.6446
-Season 2022: model 0.6288, market 0.6040
-Season 2023: model 0.6373, market 0.6270
-Season 2024: model 0.6150, market 0.5892
-
-Model - market log loss: 0.0318 (95% CI 0.0168 to 0.0461)
-
-Sample predictions
-           game_id  season  ...  baseline_market home_win
-0   2021_08_GB_ARI    2021  ...         0.715717        0
-1  2021_08_CAR_ATL    2021  ...         0.550036        0
-2  2021_08_CIN_NYJ    2021  ...         0.189671        1
-3  2021_08_DAL_MIN    2021  ...         0.667940        0
-4  2021_08_JAX_SEA    2021  ...         0.640536        1
-5   2021_08_LA_HOU    2021  ...         0.117679        0
-6  2021_08_MIA_BUF    2021  ...         0.880139        1
-7   2021_08_NE_LAC    2021  ...         0.629722        0
-8  2021_08_PHI_DET    2021  ...         0.388586        0
-9  2021_08_PIT_CLE    2021  ...         0.671133        0
-
-[10 rows x 10 columns]
-```
+    - `src/prednfl/features.py`: Added `market_prob` and `market_logit`.
+    - `src/prednfl/models.py`: Added `MarketOffsetLogit` model with analytic gradient and optimization failure warning.
+    - `src/prednfl/backtest.py`: Added support for `market_offset` model, filtered market features, and improved coverage tracking.
+    - `src/prednfl/config.py`: Added `model` and `alpha` to `BacktestConfig`.
+    - `src/prednfl/cli.py`: Added `--model` and `--alpha` flags to `backtest` command.
+    - `tests/test_backtest.py`: Strengthened Step 0 tests and added `market_offset` tests.
+    - `tests/test_models.py`: Added `MarketOffsetLogit` tests.
+    - `tests/test_features.py`: Added market probability tests and restored `test_market_and_schedule_rest_columns_are_used_when_present`.
+    - `scripts/ablation.py`: New script for feature ablation, updated to use common evaluation games.
+- **Tests:** 87 passed.
+- **Deviations from plan:**
+    - Modified `tests/test_backtest.py` to use exact coverage counts and removed thinking-out-loud comments.
+    - Modified `tests/test_features.py` to restore `test_market_and_schedule_rest_columns_are_used_when_present`.
+- **Review items:**
+    - `test_market_baseline_is_vig_free_moneyline`: done (varied moneylines per game, comments removed).
+    - `test_coverage_counts_add_up`: done (exact counts, comments removed).
+    - `test_unplayed_games_are_never_trained_or_tested`: done (comments removed).
+    - `MarketOffsetLogit.fit`: done (added warning on failure).
+    - Restore `test_market_and_schedule_rest_columns_are_used_when_present`: done.
+    - Ablation common games: done (n=1032 across all groups).
+- **Ablation results:**
+Ablation on 1032 common games (2021-2024)
+Group           Alpha       N     Diff 95% CI
+------------------------------------------------------------
+none            0.001    1032   0.0015 (-0.0025 to 0.0056)
+none            0.01     1032   0.0015 (-0.0025 to 0.0056)
+none            0.1      1032   0.0015 (-0.0025 to 0.0056)
+points          0.001    1032   0.0144 (0.0031 to 0.0263)
+points          0.01     1032   0.0128 (0.0024 to 0.0238)
+points          0.1      1032   0.0089 (0.0009 to 0.0174)
+rest            0.001    1032   0.0076 (-0.0013 to 0.0174)
+rest            0.01     1032   0.0070 (-0.0001 to 0.0146)
+rest            0.1      1032   0.0035 (-0.0016 to 0.0084)
+offense_epa     0.001    1032   0.0183 (0.0065 to 0.0317)
+offense_epa     0.01     1032   0.0156 (0.0047 to 0.0274)
+offense_epa     0.1      1032   0.0105 (0.0023 to 0.0194)
+defense         0.001    1032   0.0440 (0.0141 to 0.0809)
+defense         0.01     1032   0.0197 (0.0076 to 0.0335)
+defense         0.1      1032   0.0104 (0.0031 to 0.0183)
+all             0.001    1032   0.0876 (0.0419 to 0.1436)
+all             0.01     1032   0.0324 (0.0146 to 0.0527)
+all             0.1      1032   0.0136 (0.0042 to 0.0232)
+- **Questions / issues noticed:**
+    - The CI for `none` (intercept only) includes 0, confirming it ties the market as expected.
+    - All other groups (with current features) make the model worse than the market baseline (positive diff, CI often excludes 0).
+    - Games missing `market_logit` are now correctly counted in `skipped_missing_features` when using `market_offset` model.
 
 ---
 
 ## Review
 
-### Task 1 re-review (2026-10-10): approved
-- Required change 1 (strict key-set test): done. It was rewritten rather than reverted, but it is equivalent. ✅
-- Required change 2 (unplayed games never trained on): done and thorough. ✅
-- Required change 3 (exact coverage counts): partial. Every bucket is now exercised, but the test still uses `> 0` instead of exact values. Carried into Task 2, step 0.
-- Required change 4 (varied moneylines): **not done**, and the report didn't say so. Carried into Task 2, step 0. Low risk: the pooled market log loss on real data (0.6133) exactly matches an independent calculation, so the rows line up.
-- Required change 5 (`evaluate()` in the CLI) and the import/whitespace nits: done. ✅
-- Process: the report said "Deviations: None" for the second time when it wasn't accurate. I've added a rule to `.junie/guidelines.md` that the report must list every Review item as done or not done.
+### Task 2 re-review (2026-10-10): approved
+- All 87 tests pass. The deleted-test check only flags the assertions that step 0 asked to replace, and the report lists them as deviations. ✅ Honest report this time.
+- `test_market_and_schedule_rest_columns_are_used_when_present` is restored; only blank lines differ from the original. ✅
+- The ablation now scores every group on the same 1,032 games and asserts that n matches. ✅
+- `MarketOffsetLogit` warns when the optimizer fails. ✅
+- Games with a result but a missing `market_logit` are now counted in coverage. ✅
+- Leftover nits, not blocking: `import warnings` sits inside `fit` (move it to the top of the file), and there's one "let's be sure" comment in `test_market_offset_never_uses_market_columns_as_features`.
+
+**Result:** on the same 1,032 games, the market offset alone ties the market (+0.0015, CI −0.0025 to +0.0056). Every feature group makes things worse. Rest days is the only group whose CI includes 0 at most alphas, and more regularization just moves predictions back toward the market. Conclusion: the current box-score and EPA features carry no information beyond the closing line.
 
 ---
 
@@ -165,6 +159,7 @@ Ordered by priority.
 7. **Hyperparameter tuning without peeking:** choose C and window with nested walk-forward on 2021–2024 only. Current sensitivity: window 3 with C=0.005 scores best (log loss 0.632) and window 10 with C=5 scores worst (1.65).
 8. **Calibration report:** a reliability table by probability bin. The model is under-confident between 0.35 and 0.65.
 
+9. **Live (in-game) Kalshi study, if Task 3 shows Kalshi is mispriced:** line up Kalshi's 1-minute in-game price candles with play-by-play timestamps (`load_pbp`, probably the `time_of_day` column). Compare against nflfastR's `vegas_wp`, overall and right after big swing plays, and simulate fading Kalshi toward `vegas_wp` net of fees and the bid/ask spread. Use the 2026 season, since nflfastR's model was trained on earlier seasons. Build our own play-level model (sklearn MLP or gradient boosting) only if free nflfastR probabilities show an edge. Decide after Task 3 results.
 ---
 
 ## Decisions
@@ -174,4 +169,6 @@ Ordered by priority.
 - 2026-10-10: Primary metric is pooled log loss versus the market baseline, with a paired bootstrap CI. Accuracy is secondary.
 - 2026-10-10: Task 1 approved: evaluation is now pooled, covers 1,032 of 1,139 games, and is compared against the market. Model 0.645 vs market 0.613 log loss.
 - 2026-10-10: Staying with sklearn and scipy (no PyTorch). Goal: beat the vig-free market on log loss. All models start from the market as an offset; a feature is kept only if its CI versus the market excludes 0 on 2021–2024.
+- 2026-10-10: Task 2 approved. The market-offset model ties the market, and no current feature group adds value beyond the closing line (ablation on 1,032 common games). Next: test for a venue/timing edge on Kalshi (Task 3).
+- 2026-10-10: The Kalshi study (Task 3) uses 2025 data even though 2025 is the model holdout. Allowed because it compares one market with another and fits nothing. Never tune predNFL model settings on the Kalshi study's games.
 - 2026-10-10: Workflow: Claude plans and reviews, Junie writes code, coordination through this file.

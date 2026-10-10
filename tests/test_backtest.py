@@ -205,22 +205,28 @@ def test_market_baseline_is_vig_free_moneyline():
     schedule.loc[::2, ["home_score", "away_score"]] = [24, 17]
     schedule.loc[1::2, ["home_score", "away_score"]] = [17, 24]
 
-    # Use a constant moneyline for most games to ensure valid features for training
-    schedule["home_moneyline"] = -150
-    schedule["away_moneyline"] = 130
-    
-    # Prob(home) = (implied_home) / (implied_home + implied_away)
-    # -150: 150/250 = 0.6
-    # +130: 100/230 = 0.43478
-    expected = 0.6 / (0.6 + 100 / 230)
+    # Use varied moneylines
+    # -150/+130: implied 0.6 / 0.43478 -> vig-free 0.6 / (0.6 + 0.43478) ≈ 0.5798
+    # +200/-240: implied 0.3333 / 0.70588 -> vig-free 0.3333 / (0.3333 + 0.70588) ≈ 0.3208
+    schedule.loc[::2, "home_moneyline"] = -150
+    schedule.loc[::2, "away_moneyline"] = 130
+    schedule.loc[1::2, "home_moneyline"] = 200
+    schedule.loc[1::2, "away_moneyline"] = -240
+
+    prob1 = 0.6 / (0.6 + 100 / 230)
+    prob2 = (100 / 300) / (100 / 300 + 240 / 340)
 
     # Use window=1 so fewer games are skipped by missing features
     features, columns = build_features(schedule, rolling_window=1)
     result = Backtester(min_games_before_train=1, random_state=7, logreg_c=1.0).run(features, columns)
 
     assert not result.predictions.empty
-    assert result.predictions["baseline_market"].iloc[0] == pytest.approx(expected)
-    assert np.allclose(result.predictions["baseline_market"], expected)
+    # The first predicted game is week 2, which will be the first row in predictions.
+    # We check all rows against their expected values based on week.
+    for _, row in result.predictions.iterrows():
+        idx = schedule[schedule["game_id"] == row["game_id"]].index[0]
+        expected = prob1 if idx % 2 == 0 else prob2
+        assert row["baseline_market"] == pytest.approx(expected)
     assert "baseline_market_log_loss" in result.metrics
 
 
@@ -261,24 +267,38 @@ def test_coverage_counts_add_up():
     # 1. Unplayed game (NaN scores)
     schedule.loc[0, ["home_score", "away_score"]] = np.nan
     
-    # 2. Missing features: build_features drops first 'rolling_window' games per team.
-    # We want some games to have results but miss features.
-    # We'll set a feature to NaN manually for one game late in the schedule (e.g. 2022).
     features, columns = build_features(schedule, rolling_window=1)
     
-    # Season 2022 starts at index 8. Let's pick index 10.
+    # 2. Manual missing feature for one game.
+    # Season 2022 W2 starts at index 10.
     features.loc[10, columns[0]] = np.nan
     
-    # 3. min_games_before_train skips games early in the backtest.
-    # min_games=2 should skip at most the first week or two.
-    result = Backtester(min_games_before_train=2, random_state=7, logreg_c=0.05).run(features, columns)
-    
+    # 3. min_games_before_train=1.
+    # Coverage breakdown:
+    # Total games: 16.
+    # Games with result: 15 (idx 1-15).
+    # idx 1 (2021 W1): train is empty, len=0 < 1. skipped_min_games.
+    # idx 2, 3 (2021 W2): train={idx 1}, but idx 1 misses features. train size=0 < 1. skipped_min_games.
+    # idx 4, 5 (2021 W3): train={idx 1, 2, 3}. idx 2, 3 HAVE features. train size=2 >= 1. TESTED.
+    # idx 6, 7 (2021 W4): TESTED.
+    # idx 8, 9 (2022 W1): TESTED.
+    # idx 10 (2022 W2): misses features. skipped_missing_features.
+    # idx 11 (2022 W2): TESTED.
+    # idx 12, 13 (2022 W3): TESTED.
+    # idx 14, 15 (2022 W4): TESTED.
+    # Counts:
+    # skipped_min_games: idx 1, 2, 3, 4, 5 = 5
+    # skipped_missing_features: idx 10 = 1
+    # tested: idx 6, 7, 8, 9, 11, 12, 13, 14, 15 = 9
+    # Total = 5 + 1 + 9 = 15.
+    result = Backtester(min_games_before_train=1, random_state=7, logreg_c=0.05).run(features, columns)
+
     cov = result.coverage
     assert cov["total_games"] == 16
     assert cov["games_with_result"] == 15
-    assert cov["tested"] > 0
-    assert cov["skipped_missing_features"] > 0
-    assert cov["skipped_min_games"] > 0
+    assert cov["tested"] == 9
+    assert cov["skipped_missing_features"] == 1
+    assert cov["skipped_min_games"] == 5
     assert cov["tested"] + cov["skipped_missing_features"] + cov["skipped_min_games"] == 15
 
 
@@ -302,11 +322,6 @@ def test_unplayed_games_are_never_trained_or_tested(spy):
     # 2. Check that it was never in any training set
     assert spy.calls, "SpyModel was never called"
     for train_keys, test_keys in spy.calls:
-        # train_keys are from X_train[:, 0] which are week_keys.
-        # But wait, multiple games can have the same week_key.
-        # We need to be careful. If unplayed_idx is in the train week, but filtered out...
-        # The number of games in that week in train_keys should be one less.
-        
         test_key = test_keys[0]
         if unplayed_week_key < test_key:
             # This week was part of training.
@@ -323,3 +338,46 @@ def test_unplayed_games_are_never_trained_or_tested(spy):
             (features["week_key"] < test_key) & features["home_win"].notna()
         ).sum()
         assert len(train_keys) == expected_train_count
+
+
+def test_market_offset_never_uses_market_columns_as_features(monkeypatch):
+    schedule = make_schedule(home_moneyline=-150, away_moneyline=130)
+    features, columns = build_features(schedule, rolling_window=1)
+    
+    spy_calls = []
+    class SpyOffsetModel:
+        def __init__(self, alpha): self.alpha = alpha
+        def fit(self, X, y, offset): spy_calls.append(X.shape[1])
+        def predict_proba(self, X, offset): return np.full(len(X), 0.5)
+        
+    monkeypatch.setattr("prednfl.backtest.MarketOffsetLogit", SpyOffsetModel)
+    
+    # feature_columns includes market columns by default
+    Backtester(min_games_before_train=1, random_state=7, logreg_c=1.0, model="market_offset").run(features, columns)
+    
+    assert len(spy_calls) > 0
+    # spread_line, home_ml_prob, away_ml_prob, ml_prob_diff should be excluded.
+    # plus market_prob, market_logit if they were in columns (they are not by default, but let's be sure)
+    market_cols = {"spread_line", "home_ml_prob", "away_ml_prob", "ml_prob_diff", "market_prob", "market_logit"}
+    expected_count = len([c for c in columns if c not in market_cols])
+    for call_count in spy_calls:
+        assert call_count == expected_count
+
+
+def test_default_backtest_unchanged_by_market_columns():
+    # Run logreg with and without market columns in the data, results should be identical.
+    schedule = make_schedule(seasons=(2021,), n_weeks=6)
+    schedule.loc[::2, ["home_score", "away_score"]] = [24, 17]
+    schedule.loc[1::2, ["home_score", "away_score"]] = [17, 24]
+
+    # No market data
+    f1, c1 = build_features(schedule.copy(), rolling_window=1)
+    res1 = Backtester(min_games_before_train=2, random_state=7, logreg_c=0.05).run(f1, c1)
+
+    # With market data
+    schedule["home_moneyline"] = -110
+    schedule["away_moneyline"] = -110
+    f2, c2 = build_features(schedule.copy(), rolling_window=1)
+    res2 = Backtester(min_games_before_train=2, random_state=7, logreg_c=0.05).run(f2, c2)
+    
+    pd.testing.assert_frame_equal(res1.predictions, res2.predictions.drop(columns=["baseline_market"]))

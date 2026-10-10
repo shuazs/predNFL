@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import pandas as pd
 
 REQUIRED_SCHEDULE_COLUMNS = {
@@ -287,6 +288,14 @@ def build_features(
         features["away_ml_prob"] = features["away_moneyline"].apply(_moneyline_to_prob)
         features["ml_prob_diff"] = features["home_ml_prob"] - features["away_ml_prob"]
         base_feature_columns.extend(["home_ml_prob", "away_ml_prob", "ml_prob_diff"])
+
+        # Market-offset features (vig-free)
+        features["market_prob"] = features["home_ml_prob"] / (
+            features["home_ml_prob"] + features["away_ml_prob"]
+        )
+        features["market_logit"] = np.log(
+            features["market_prob"] / (1 - features["market_prob"])
+        )
 
     if "home_rest" in features.columns:
         features["home_rest_sched"] = features["home_rest"]

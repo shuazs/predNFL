@@ -8,6 +8,8 @@ class BacktestConfig:
     min_games_before_train: int = 6
     random_state: int = 7
     logreg_c: float = 0.05
+    model: str = "logreg"
+    alpha: float = 0.01
     team_stats_metrics: tuple[str, ...] = (
         "passing_epa",
         "rushing_epa",

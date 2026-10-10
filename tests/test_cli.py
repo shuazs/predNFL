@@ -43,13 +43,18 @@ def test_build_config_defaults():
 
 def test_build_config_overrides():
     args = cli._parse_args(
-        ["backtest", "--seasons", "2019-2020", "--rolling-window", "4", "--min-games", "20", "--c", "0.5"]
+        [
+            "backtest", "--seasons", "2019-2020", "--rolling-window", "4",
+            "--min-games", "20", "--c", "0.5", "--model", "market_offset", "--alpha", "0.1"
+        ]
     )
     config = cli._build_config(args)
     assert config.seasons == (2019, 2020)
     assert config.rolling_window_games == 4
     assert config.min_games_before_train == 20
     assert config.logreg_c == 0.5
+    assert config.model == "market_offset"
+    assert config.alpha == 0.1
 
 
 def test_build_config_allows_c_of_zero_to_reach_model():

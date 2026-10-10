@@ -176,12 +176,30 @@ def test_base_feature_columns_without_market_data(schedule):
     ]
 
 
+def test_market_prob_is_vig_free_and_not_a_model_feature():
+    schedule = make_schedule(home_moneyline=-150, away_moneyline=130)
+    features, columns = build_features(schedule, rolling_window=2)
+
+    # Implied probs: 0.6 and 100/230 ≈ 0.4348
+    # market_prob = 0.6 / (0.6 + 0.4348) ≈ 0.58
+    expected_prob = 0.6 / (0.6 + 100 / 230)
+    expected_logit = np.log(expected_prob / (1 - expected_prob))
+
+    assert "market_prob" in features.columns
+    assert "market_logit" in features.columns
+    assert features["market_prob"].iloc[0] == pytest.approx(expected_prob)
+    assert features["market_logit"].iloc[0] == pytest.approx(expected_logit)
+
+    # BUT they must NOT be in columns (the list of features for the default model)
+    assert "market_prob" not in columns
+    assert "market_logit" not in columns
+
+
 def test_market_and_schedule_rest_columns_are_used_when_present():
     schedule = make_schedule(
         spread_line=-3.0, home_moneyline=-150, away_moneyline=130, home_rest=7, away_rest=6
     )
     features, columns = build_features(schedule, rolling_window=2)
-
     for name in (
         "spread_line",
         "home_ml_prob",
@@ -192,7 +210,6 @@ def test_market_and_schedule_rest_columns_are_used_when_present():
         "rest_sched_diff",
     ):
         assert name in columns
-
     assert features["home_ml_prob"].iloc[0] == pytest.approx(0.6)
     assert features["away_ml_prob"].iloc[0] == pytest.approx(100 / 230)
     assert features["rest_sched_diff"].iloc[0] == 1

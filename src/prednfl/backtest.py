@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .models import LogisticRegressionModel
+from .models import LogisticRegressionModel, MarketOffsetLogit
 from .metrics import evaluate
 
 
@@ -61,13 +61,49 @@ def _summarize_metrics(metrics_by_split: list[dict[str, float]], prefix: str) ->
 
 
 class Backtester:
-    def __init__(self, min_games_before_train: int, random_state: int, logreg_c: float) -> None:
+    def __init__(
+        self,
+        min_games_before_train: int,
+        random_state: int,
+        logreg_c: float,
+        model: str = "logreg",
+        alpha: float = 0.01,
+    ) -> None:
         self.min_games_before_train = min_games_before_train
         self.random_state = random_state
         self.logreg_c = logreg_c
+        self.model_type = model
+        self.alpha = alpha
 
     def run(self, features: pd.DataFrame, feature_columns: list[str]) -> BacktestResult:
         features = features.copy()
+        # Coverage tracking - initial counts
+        total_games = len(features)
+        games_with_result_initial = int(features["home_win"].notna().sum())
+
+        # Handle MarketOffsetLogit special requirements
+        active_features = feature_columns
+        offset_col = None
+        skipped_market_logit = 0
+        if self.model_type == "market_offset":
+            offset_col = "market_logit"
+            # Exclude market-related columns from features
+            exclude = {
+                "spread_line",
+                "home_ml_prob",
+                "away_ml_prob",
+                "ml_prob_diff",
+                "market_prob",
+                "market_logit",
+            }
+            active_features = [c for c in feature_columns if c not in exclude]
+            # Games missing market_logit are considered "skipped_missing_features"
+            # but they must have a result to be counted in that bucket.
+            missing_logit = features[offset_col].isna() & features["home_win"].notna()
+            skipped_market_logit = int(missing_logit.sum())
+            # Drop rows with NaN market_logit for processing
+            features = features.dropna(subset=[offset_col])
+
         features.sort_values(["season", "week", "game_date", "game_id"], inplace=True)
 
         predictions = []
@@ -78,10 +114,9 @@ class Backtester:
         prior_season_win_pcts = _team_season_win_pct(features)
 
         # Coverage tracking
-        total_games = len(features)
         games_with_result = int(features["home_win"].notna().sum())
         skipped_min_games = 0
-        skipped_missing_features = 0
+        skipped_missing_features = skipped_market_logit
         tested = 0
 
         split_keys = (
@@ -97,10 +132,10 @@ class Backtester:
             )
             test_mask = (features["season"] == season) & (features["week"] == week)
 
-            train = features[train_mask].dropna(subset=feature_columns + ["home_win"])
+            train = features[train_mask].dropna(subset=active_features + ["home_win"])
             test_all = features[test_mask]
             test_with_result = test_all.dropna(subset=["home_win"])
-            test = test_with_result.dropna(subset=feature_columns)
+            test = test_with_result.dropna(subset=active_features)
 
             if test_with_result.empty:
                 continue
@@ -116,17 +151,24 @@ class Backtester:
 
             tested += len(test)
 
-            X_train = train[feature_columns].to_numpy(dtype=float)
+            X_train = train[active_features].to_numpy(dtype=float)
             y_train = train["home_win"].to_numpy(dtype=int)
-            X_test = test[feature_columns].to_numpy(dtype=float)
+            X_test = test[active_features].to_numpy(dtype=float)
             y_test = test["home_win"].to_numpy(dtype=int)
 
-            model = LogisticRegressionModel(
-                random_state=self.random_state,
-                c_value=self.logreg_c,
-            )
-            model.fit(X_train, y_train)
-            probs = model.predict_proba(X_test)
+            if self.model_type == "market_offset":
+                offset_train = train[offset_col].to_numpy(dtype=float)
+                offset_test = test[offset_col].to_numpy(dtype=float)
+                model = MarketOffsetLogit(alpha=self.alpha)
+                model.fit(X_train, y_train, offset_train)
+                probs = model.predict_proba(X_test, offset_test)
+            else:
+                model = LogisticRegressionModel(
+                    random_state=self.random_state,
+                    c_value=self.logreg_c,
+                )
+                model.fit(X_train, y_train)
+                probs = model.predict_proba(X_test)
 
             model_metrics_by_split.append(evaluate(y_test, probs))
 
@@ -191,7 +233,7 @@ class Backtester:
 
         coverage = {
             "total_games": total_games,
-            "games_with_result": games_with_result,
+            "games_with_result": games_with_result_initial,
             "tested": tested,
             "skipped_missing_features": skipped_missing_features,
             "skipped_min_games": skipped_min_games,
