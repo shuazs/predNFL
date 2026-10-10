@@ -129,6 +129,18 @@ def test_home_win_label(schedule):
     assert _row(features, schedule.loc[2, "game_id"])["home_win"] == 0
 
 
+def test_home_win_is_nan_for_unplayed_games(schedule):
+    schedule = schedule.copy()
+    schedule.loc[0, ["home_score", "away_score"]] = [float("nan"), 17]
+    schedule.loc[1, ["home_score", "away_score"]] = [24, float("nan")]
+    schedule.loc[2, ["home_score", "away_score"]] = [float("nan"), float("nan")]
+    features, _ = build_features(schedule, rolling_window=2)
+
+    assert np.isnan(_row(features, schedule.loc[0, "game_id"])["home_win"])
+    assert np.isnan(_row(features, schedule.loc[1, "game_id"])["home_win"])
+    assert np.isnan(_row(features, schedule.loc[2, "game_id"])["home_win"])
+
+
 def test_output_has_one_row_per_game(schedule):
     features, _ = build_features(schedule, rolling_window=2)
     assert len(features) == len(schedule)

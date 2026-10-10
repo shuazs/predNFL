@@ -136,7 +136,7 @@ def offline_features(monkeypatch):
 def test_backtest_command_prints_all_sections(offline_features, capsys):
     cli.main(["backtest", "--rolling-window", "2", "--min-games", "8"])
     out = capsys.readouterr().out
-    for section in ("model", "baseline_home_rate", "baseline_prior_season", "Sample predictions"):
+    for section in ("Tested", "Backtest summary metrics", "Acc", "per-week average", "Sample predictions"):
         assert section in out
 
 

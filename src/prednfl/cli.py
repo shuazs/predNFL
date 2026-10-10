@@ -4,12 +4,14 @@ import argparse
 from dataclasses import replace
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 from prednfl.backtest import Backtester
 from prednfl.config import BacktestConfig, DEFAULT_CONFIG
 from prednfl.data import DataLoader
 from prednfl.features import build_features
+from prednfl.metrics import evaluate, paired_bootstrap_diff
 from prednfl.models import LogisticRegressionModel
 
 
@@ -99,14 +101,55 @@ def _run_backtest(config: BacktestConfig) -> None:
     )
     result = backtester.run(features, feature_columns)
 
-    ordered_prefixes = ("model_", "baseline_home_rate_", "baseline_prior_season_")
-    print(f"Backtest summary metrics (C={config.logreg_c})")
+    cov = result.coverage
+    print(f"Tested {cov['tested']} of {cov['games_with_result']} games (skipped: {cov['skipped_missing_features']} missing features, {cov['skipped_min_games']} before min games)")
+
+    print(f"\nBacktest summary metrics (C={config.logreg_c})")
+
+    # Pooled Table
+    prefixes = ["model", "baseline_home_rate", "baseline_prior_season", "baseline_market"]
+    available_prefixes = [p for p in prefixes if f"{p}_accuracy" in result.pooled_metrics]
+
+    header = f"{'Model':<25} {'Acc':>7} {'LogLoss':>9} {'Brier':>7}"
+    print(header)
+    print("-" * len(header))
+    for p in available_prefixes:
+        acc = result.pooled_metrics[f"{p}_accuracy"]
+        ll = result.pooled_metrics[f"{p}_log_loss"]
+        br = result.pooled_metrics[f"{p}_brier"]
+        print(f"{p:<25} {acc:>7.4f} {ll:>9.4f} {br:>7.4f}")
+
+    print("\nper-week average")
+    ordered_prefixes = ("model_", "baseline_home_rate_", "baseline_prior_season_", "baseline_market_")
     for prefix in ordered_prefixes:
+        relevant_metrics = {k: v for k, v in result.metrics.items() if k.startswith(prefix)}
+        if not relevant_metrics:
+            continue
         print(f"\n{prefix.rstrip('_')}")
-        for key, value in result.metrics.items():
-            if key.startswith(prefix):
-                metric_name = key.replace(prefix, "")
-                print(f"{metric_name}: {value:.4f}")
+        for key, value in relevant_metrics.items():
+            metric_name = key.replace(prefix, "")
+            print(f"{metric_name}: {value:.4f}")
+
+    if not result.predictions.empty:
+        print("\nper-season pooled log loss")
+        seasons = sorted(result.predictions["season"].unique())
+        for s in seasons:
+            s_preds = result.predictions[result.predictions["season"] == s]
+            y_s = s_preds["home_win"].to_numpy(dtype=int)
+            ll_model = evaluate(y_s, s_preds["home_win_prob"].to_numpy())["log_loss"]
+            out = f"Season {int(s)}: model {ll_model:.4f}"
+            if "baseline_market" in s_preds.columns:
+                ll_market = evaluate(y_s, s_preds["baseline_market"].to_numpy())["log_loss"]
+                out += f", market {ll_market:.4f}"
+            print(out)
+
+    if "baseline_market" in result.predictions.columns:
+        boot = paired_bootstrap_diff(
+            result.predictions["home_win"].to_numpy(),
+            result.predictions["home_win_prob"].to_numpy(),
+            result.predictions["baseline_market"].to_numpy(),
+        )
+        print(f"\nModel - market log loss: {boot['mean']:.4f} (95% CI {boot['lo']:.4f} to {boot['hi']:.4f})")
 
     print("\nSample predictions")
     print(result.predictions.head(10))

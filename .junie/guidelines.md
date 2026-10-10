@@ -17,7 +17,8 @@ Fill in **Junie report** in `HANDOFF.md`:
 - Status: `done`, `blocked`, or `partial`
 - Files changed
 - Test result (the last line of `pytest` output)
-- Deviations from the plan, and why
+- Deviations from the plan, and why. Any edit to an existing test, or any step you skipped or only partly did, counts as a deviation.
+- If the task carries over items from a Review: one line per item, marked `done` or `not done`, with a reason for anything not done
 - Questions or issues you noticed but didn't fix
 
 Don't edit the **Current task**, **Review**, **Backlog** or **Decisions** sections; Claude maintains those.

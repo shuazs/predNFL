@@ -13,6 +13,8 @@ from .metrics import evaluate
 class BacktestResult:
     predictions: pd.DataFrame
     metrics: dict[str, float]
+    pooled_metrics: dict[str, float]
+    coverage: dict[str, int]
 
 
 def _team_season_win_pct(features: pd.DataFrame) -> pd.DataFrame:
@@ -72,7 +74,15 @@ class Backtester:
         model_metrics_by_split = []
         home_rate_metrics_by_split = []
         prior_season_metrics_by_split = []
+        market_metrics_by_split = []
         prior_season_win_pcts = _team_season_win_pct(features)
+
+        # Coverage tracking
+        total_games = len(features)
+        games_with_result = int(features["home_win"].notna().sum())
+        skipped_min_games = 0
+        skipped_missing_features = 0
+        tested = 0
 
         split_keys = (
             features[["season", "week"]]
@@ -88,10 +98,23 @@ class Backtester:
             test_mask = (features["season"] == season) & (features["week"] == week)
 
             train = features[train_mask].dropna(subset=feature_columns + ["home_win"])
-            test = features[test_mask].dropna(subset=feature_columns + ["home_win"])
+            test_all = features[test_mask]
+            test_with_result = test_all.dropna(subset=["home_win"])
+            test = test_with_result.dropna(subset=feature_columns)
 
-            if len(train) < self.min_games_before_train or test.empty:
+            if test_with_result.empty:
                 continue
+
+            if len(train) < self.min_games_before_train:
+                skipped_min_games += len(test_with_result)
+                continue
+
+            skipped_missing_features += len(test_with_result) - len(test)
+
+            if test.empty:
+                continue
+
+            tested += len(test)
 
             X_train = train[feature_columns].to_numpy(dtype=float)
             y_train = train["home_win"].to_numpy(dtype=int)
@@ -114,6 +137,12 @@ class Backtester:
             prior_probs = _prior_season_probs(test, prior_season_win_pcts)
             prior_season_metrics_by_split.append(evaluate(y_test, prior_probs))
 
+            market_probs = None
+            if "home_ml_prob" in test.columns and "away_ml_prob" in test.columns:
+                market_probs = test["home_ml_prob"] / (test["home_ml_prob"] + test["away_ml_prob"])
+                market_probs = market_probs.to_numpy(dtype=float)
+                market_metrics_by_split.append(evaluate(y_test, market_probs))
+
             pred_frame = test[[
                 "game_id",
                 "season",
@@ -124,6 +153,8 @@ class Backtester:
             pred_frame["home_win_prob"] = probs
             pred_frame["baseline_home_rate"] = home_rate_probs
             pred_frame["baseline_prior_win_pct"] = prior_probs
+            if market_probs is not None:
+                pred_frame["baseline_market"] = market_probs
             pred_frame["home_win"] = y_test
             predictions.append(pred_frame)
 
@@ -146,5 +177,29 @@ class Backtester:
         summary.update(_summarize_metrics(model_metrics_by_split, "model"))
         summary.update(_summarize_metrics(home_rate_metrics_by_split, "baseline_home_rate"))
         summary.update(_summarize_metrics(prior_season_metrics_by_split, "baseline_prior_season"))
+        if market_metrics_by_split:
+            summary.update(_summarize_metrics(market_metrics_by_split, "baseline_market"))
 
-        return BacktestResult(predictions=all_predictions, metrics=summary)
+        pooled = {}
+        if not all_predictions.empty:
+            y_true = all_predictions["home_win"].to_numpy(dtype=int)
+            pooled.update(_summarize_metrics([evaluate(y_true, all_predictions["home_win_prob"].to_numpy())], "model"))
+            pooled.update(_summarize_metrics([evaluate(y_true, all_predictions["baseline_home_rate"].to_numpy())], "baseline_home_rate"))
+            pooled.update(_summarize_metrics([evaluate(y_true, all_predictions["baseline_prior_win_pct"].to_numpy())], "baseline_prior_season"))
+            if "baseline_market" in all_predictions.columns:
+                pooled.update(_summarize_metrics([evaluate(y_true, all_predictions["baseline_market"].to_numpy())], "baseline_market"))
+
+        coverage = {
+            "total_games": total_games,
+            "games_with_result": games_with_result,
+            "tested": tested,
+            "skipped_missing_features": skipped_missing_features,
+            "skipped_min_games": skipped_min_games,
+        }
+
+        return BacktestResult(
+            predictions=all_predictions,
+            metrics=summary,
+            pooled_metrics=pooled,
+            coverage=coverage,
+        )

@@ -267,7 +267,8 @@ def build_features(
                 )
                 team_stat_diff_columns.append(diff_name)
 
-    features["home_win"] = (features["home_score"] > features["away_score"]).astype(int)
+    features["home_win"] = (features["home_score"] > features["away_score"]).astype(float)
+    features.loc[features["home_score"].isna() | features["away_score"].isna(), "home_win"] = float("nan")
 
     base_feature_columns = [
         "home_pf_roll",

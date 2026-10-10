@@ -16,7 +16,6 @@ class BacktestConfig:
         "def_interceptions",
         "def_tackles_for_loss",
         "penalty_yards",
-        "fg_pct",
     )
 
 
